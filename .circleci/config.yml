@@ -1,0 +1,343 @@
+version: 2.1
+
+orbs:
+  aws-ecr: circleci/aws-ecr@7.3.0
+  aws-cli: circleci/aws-cli@2.0.6
+  aws-ecs: circleci/aws-ecs@2.0.0
+  slack: circleci/slack@4.8.3
+
+parameters:
+  node-version:
+    type: string
+    default: '16.13.1'
+  base-version:
+    type: string
+    default: 'stable-20.04'
+  python-version:
+    type: string
+    default: '3.9'
+
+executors:
+  node-executor:
+    docker:
+      - image: cimg/node:<< pipeline.parameters.node-version >>
+  base-executor:
+    docker:
+      - image: cimg/base:<< pipeline.parameters.base-version >>
+  python-executor:
+    docker:
+      - image: cimg/python:<< pipeline.parameters.python-version >>
+
+commands:
+  buildproject:
+    description: 'Install necessary dependencies and build project'
+    steps:
+      - run:
+          command: |
+            yarn install --cache-folder ~/.cache/yarn
+            yarn build
+
+jobs:
+  build:
+    executor: node-executor
+    resource_class: medium
+    steps:
+      - checkout
+      - restore_cache:
+          name: Restore Yarn Package Cache
+          keys:
+            - v1-deps-yarn-packages-{{ checksum "yarn.lock" }}
+            - v1-deps-yarn-packages-
+      - buildproject
+      - save_cache:
+          name: Save Yarn Package Cache
+          key: v1-deps-yarn-packages-{{ checksum "yarn.lock" }}
+          paths:
+            - ~/.cache/yarn
+      - persist_to_workspace:
+          root: ~/project
+          paths:
+            - dist
+            - node_modules
+            - circleci.Dockerfile
+            - env.js
+            - paths.js
+            - ormconfig.js
+            - entrypoint.sh
+            - src/migrations
+            - package.json
+      - slack/notify:
+          branch_pattern: uat
+          event: fail
+          template: basic_fail_1
+          channel: ${SLACK_UAT_CHANNEL}
+
+  test:
+    executor: node-executor
+    resource_class: medium
+    steps:
+      - checkout
+      - run:
+          name: Test
+          command: |
+            yarn add jest@27.2.5
+            yarn add --dev jest-junit
+            yarn test:cov --passWithNoTests --ci --runInBand --reporters=default --reporters=jest-junit
+          environment:
+            JEST_JUNIT_OUTPUT_DIR: ./reports/junit/test-result.xml
+      - store_test_results:
+          path: ./reports/
+      - persist_to_workspace:
+          root: coverage
+          paths:
+            - lcov.info
+      - slack/notify:
+          branch_pattern: uat
+          event: fail
+          template: basic_fail_1
+          channel: ${SLACK_UAT_CHANNEL}
+
+  code-scan:
+    docker:
+      - image: sonarsource/sonar-scanner-cli:4.7
+    resource_class: medium
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Scan code quality
+          command: |
+            sonar-scanner --version
+            sonar-scanner \
+            -Dsonar.host.url=${SONAR_HOST} \
+            -Dsonar.login=${SONAR_TOKEN} \
+            -Dsonar.projectKey=$CIRCLE_PROJECT_REPONAME \
+            -Dsonar.projectName=$CIRCLE_PROJECT_REPONAME \
+            -Dsonar.javascript.lcov.reportPaths=/tmp/workspace/lcov.info
+
+  build-image-push-ecr:
+    executor: base-executor
+    resource_class: medium+
+    steps:
+      - attach_workspace:
+          at: ~/project
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - aws-ecr/build-and-push-image:
+          account-url: AWS_ACCOUNT_URL
+          aws-access-key-id: AWS_ACCESS_KEY_ID
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY
+          region: AWS_DEFAULT_REGION
+          create-repo: true
+          repo: $CIRCLE_PROJECT_REPONAME
+          dockerfile: circleci.Dockerfile
+          path: .
+          checkout: false
+          tag: 'latest,$CIRCLE_BRANCH-$CIRCLE_SHA1'
+
+  uat-build-image-push-ecr:
+    executor: base-executor
+    resource_class: medium+
+    steps:
+      - attach_workspace:
+          at: ~/project
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - aws-ecr/build-and-push-image:
+          account-url: AWS_ACCOUNT_URL
+          aws-access-key-id: AWS_ACCESS_KEY_ID
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY
+          region: AWS_DEFAULT_REGION
+          create-repo: true
+          repo: $CIRCLE_BRANCH-$CIRCLE_PROJECT_REPONAME
+          dockerfile: circleci.Dockerfile
+          path: .
+          checkout: false
+          tag: 'latest,$CIRCLE_BRANCH-$CIRCLE_SHA1'
+      - slack/notify:
+          branch_pattern: uat
+          event: fail
+          template: basic_fail_1
+          channel: ${SLACK_UAT_CHANNEL}
+
+  deploy:
+    executor: python-executor
+    resource_class: medium
+    steps:
+      - aws-cli/setup:
+          aws-access-key-id: AWS_ACCESS_KEY_ID
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY
+          aws-region: AWS_DEFAULT_REGION
+      - aws-ecs/update-service:
+          container-image-name-updates: 'container=${ECS_CONTAINER},tag=$CIRCLE_BRANCH-$CIRCLE_SHA1'
+          cluster-name: ${DEV_INTERNAL_SERVICE_CLUSTER}
+          family: ${ECS_TASK_DEF}
+          service-name: ${ECS_SERVICE}
+          force-new-deployment: true
+
+  uat-deploy:
+    executor: python-executor
+    resource_class: medium
+    steps:
+      - aws-cli/setup:
+          aws-access-key-id: AWS_ACCESS_KEY_ID
+          aws-secret-access-key: AWS_SECRET_ACCESS_KEY
+          aws-region: AWS_DEFAULT_REGION
+      - aws-ecs/update-service:
+          container-image-name-updates: 'container=${UAT_ECS_CONTAINER},tag=$CIRCLE_BRANCH-$CIRCLE_SHA1'
+          cluster-name: ${UAT_INTERNAL_SERVICE_CLUSTER}
+          family: ${UAT_ECS_TASK_DEF}
+          service-name: ${UAT_ECS_SERVICE}
+          force-new-deployment: true
+      - checkout
+      - run:
+          name: 'Set the project version'
+          command: |
+            echo 'export PROJECT_VERSION="$(cat package.json | grep version | cut -c 15-19)"' >> $BASH_ENV
+      - slack/notify:
+          branch_pattern: uat
+          event: fail
+          template: basic_fail_1
+          channel: ${SLACK_UAT_CHANNEL}
+      - slack/notify:
+          branch_pattern: uat
+          event: pass
+          channel: ${SLACK_UAT_CHANNEL}
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ":white_check_mark: Deployment Successful! :white_check_mark:",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Project*: $CIRCLE_PROJECT_REPONAME"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Branch*: $CIRCLE_BRANCH"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Author*: $CIRCLE_USERNAME"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*SHA*: $CIRCLE_SHA1"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*When*: $(date +'%m/%d/%Y %T')"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Version*: $PROJECT_VERSION"
+                  }
+                }
+              ]
+            }
+
+workflows:
+  development-workflow:
+    jobs:
+      - build:
+          filters:
+            branches:
+              only: develop
+          context:
+            - slack-context
+      - test:
+          filters:
+            branches:
+              only: develop
+          context:
+            - slack-context
+          requires:
+            - build
+      - code-scan:
+          filters:
+            branches:
+              only: develop
+          context:
+            - sonar-context
+          requires:
+            - build
+      - build-image-push-ecr:
+          filters:
+            branches:
+              only: develop
+          context:
+            - aws-context
+          requires:
+            - build
+      - deploy:
+          filters:
+            branches:
+              only: develop
+          context:
+            - aws-context
+            - dev-aws-ecs-cluster-context
+            - slack-context
+          requires:
+            - build-image-push-ecr
+  uat-workflow:
+    jobs:
+      - build:
+          filters:
+            branches:
+              only: uat
+          context:
+            - slack-context
+      - test:
+          filters:
+            branches:
+              only: uat
+          context:
+            - slack-context
+          requires:
+            - build
+      - uat-build-image-push-ecr:
+          filters:
+            branches:
+              only: uat
+          context:
+            - aws-context
+            - slack-context
+          requires:
+            - build
+      - uat-deploy:
+          filters:
+            branches:
+              only: uat
+          context:
+            - aws-context
+            - uat-aws-ecs-cluster-context
+            - slack-context
+          requires:
+            - uat-build-image-push-ecr
