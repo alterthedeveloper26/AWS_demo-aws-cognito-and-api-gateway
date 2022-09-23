@@ -1,0 +1,52 @@
+{
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.preferences.importModuleSpecifier": "non-relative",
+
+  // ts import sorter
+  "importSorter.importStringConfiguration.maximumNumberOfImportExpressionsPerLine.count": 80,
+  "importSorter.generalConfiguration.sortOnBeforeSave": true,
+  "importSorter.importStringConfiguration.tabSize": 2,
+  "importSorter.sortConfiguration.customOrderingRules.defaultNumberOfEmptyLinesAfterGroup": 1,
+  "importSorter.importStringConfiguration.numberOfEmptyLinesAfterAllImports": 1,
+  "importSorter.sortConfiguration.customOrderingRules.rules": [
+    {
+      "type": "importMember",
+      "regex": "^$",
+      "orderLevel": 10,
+      "disableSort": true
+    },
+    {
+      "regex": "^[@]",
+      "orderLevel": 30
+    },
+    {
+      "regex": "^[~]",
+      "orderLevel": 40
+    },
+    {
+      "regex": "^[.]",
+      "orderLevel": 50
+    }
+  ],
+  "importSorter.importStringConfiguration.maximumNumberOfImportExpressionsPerLine.type": "newLineEachExpressionAfterCountLimitExceptIfOnlyOne",
+  "workbench.colorCustomizations": {
+    "activityBar.activeBackground": "#fbed80",
+    "activityBar.background": "#fbed80",
+    "activityBar.foreground": "#15202b",
+    "activityBar.inactiveForeground": "#15202b99",
+    "activityBarBadge.background": "#06b9a5",
+    "activityBarBadge.foreground": "#15202b",
+    "commandCenter.border": "#15202b99",
+    "sash.hoverBorder": "#fbed80",
+    "statusBar.background": "#f9e64f",
+    "statusBar.foreground": "#15202b",
+    "statusBarItem.hoverBackground": "#f7df1e",
+    "statusBarItem.remoteBackground": "#f9e64f",
+    "statusBarItem.remoteForeground": "#15202b",
+    "titleBar.activeBackground": "#f9e64f",
+    "titleBar.activeForeground": "#15202b",
+    "titleBar.inactiveBackground": "#f9e64f99",
+    "titleBar.inactiveForeground": "#15202b99"
+  },
+  "peacock.color": "#f9e64f"
+}
